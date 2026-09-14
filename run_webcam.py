@@ -14,10 +14,11 @@ app = FaceAnalysis(
 app.prepare(ctx_id=0, det_size=(256, 256))  # 256x256으로 경량화
 print("✅ 준비 완료!")
 
-def compute_similarity(feat1, feat2):
-    return np.dot(feat1, feat2) / (np.linalg.norm(feat1) * np.linalg.norm(feat2))
+def normalize(vec):
+    norm = np.linalg.norm(vec)
+    return vec / norm if norm > 0 else vec
 
-enrolled_embedding = None
+enrolled_embedding = None  # 등록 시 정규화해서 저장 -> 매 프레임 norm 재계산 불필요
 enrolled_name = "User"
 THRESHOLD = 0.50
 
@@ -79,7 +80,7 @@ while cap.isOpened():
         query_embedding = face.embedding
 
         if enrolled_embedding is not None:
-            sim = compute_similarity(query_embedding, enrolled_embedding)
+            sim = float(np.dot(normalize(query_embedding), enrolled_embedding))
             if sim >= THRESHOLD:
                 color = (0, 255, 0)
                 label = f"AUTH SUCCESS ({sim:.2f})"
@@ -99,7 +100,7 @@ while cap.isOpened():
     key = cv2.waitKey(1) & 0xFF
     if key == ord('s'):
         if len(cached_faces) == 1:
-            enrolled_embedding = cached_faces[0].embedding.copy()
+            enrolled_embedding = normalize(cached_faces[0].embedding.copy())
             print("🎉 얼굴 등록 완료!")
         elif len(cached_faces) == 0:
             print("⚠️ 얼굴이 감지되지 않았습니다.")

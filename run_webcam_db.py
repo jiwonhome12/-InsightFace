@@ -81,8 +81,17 @@ init_db()
 enrolled_users = load_all_users_from_db()
 print(f"📂 DB에서 총 {len(enrolled_users)}명의 등록 사용자를 로드했습니다.")
 
-def compute_similarity(feat1, feat2):
-    return np.dot(feat1, feat2) / (np.linalg.norm(feat1) * np.linalg.norm(feat2))
+def build_embedding_matrix(users):
+    # 등록자 임베딩을 미리 정규화해서 쌓아두면 프레임마다 norm을 다시
+    # 계산할 필요 없이 행렬곱 한 번으로 전원과의 유사도를 구할 수 있다.
+    if not users:
+        return np.empty((0, 512), dtype=np.float32)
+    mat = np.stack([u["embedding"] for u in users]).astype(np.float32)
+    norms = np.linalg.norm(mat, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return mat / norms
+
+embed_matrix = build_embedding_matrix(enrolled_users)
 
 # ==========================================
 # 3. 비동기 AI 연산 스레드
@@ -133,31 +142,34 @@ while cap.isOpened():
     cv2.putText(display_frame, f"Registered: {len(enrolled_users)} users (Press 's' to enroll)",
                 (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
 
-    # 실시간 얼굴 인식 & 1:N DB 비교
-    for face in cached_faces:
-        bbox = face.bbox.astype(int)
-        query_embedding = face.embedding
+    # 실시간 얼굴 인식 & 1:N DB 비교 (전원과의 유사도를 행렬곱 한 번으로 계산)
+    if cached_faces:
+        face_embs = np.asarray([f.embedding for f in cached_faces], dtype=np.float32)
+        face_norms = np.linalg.norm(face_embs, axis=1, keepdims=True)
+        face_norms[face_norms == 0] = 1.0
+        face_embs_normed = face_embs / face_norms
 
-        best_match = None
-        best_sim = -1.0
+        has_users = len(embed_matrix) > 0
+        if has_users:
+            sims = face_embs_normed @ embed_matrix.T  # (num_faces, num_users)
+            match_idx = np.argmax(sims, axis=1)
+            match_sims = sims[np.arange(len(cached_faces)), match_idx]
 
-        # DB에 저장된 모든 사용자와 유사도 비교
-        for user in enrolled_users:
-            sim = compute_similarity(query_embedding, user["embedding"])
-            if sim > best_sim:
-                best_sim = sim
-                best_match = user
+        for i, face in enumerate(cached_faces):
+            bbox = face.bbox.astype(int)
+            best_sim = float(match_sims[i]) if has_users else -1.0
+            best_match = enrolled_users[match_idx[i]] if has_users else None
 
-        if best_sim >= THRESHOLD and best_match is not None:
-            color = (0, 255, 0)
-            label = f"{best_match['name']} ({best_sim:.2f})"
-        else:
-            color = (0, 0, 255)
-            label = f"UNKNOWN ({best_sim:.2f})" if best_sim > 0 else "UNKNOWN"
+            if best_sim >= THRESHOLD and best_match is not None:
+                color = (0, 255, 0)
+                label = f"{best_match['name']} ({best_sim:.2f})"
+            else:
+                color = (0, 0, 255)
+                label = f"UNKNOWN ({best_sim:.2f})" if best_sim > 0 else "UNKNOWN"
 
-        cv2.rectangle(display_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
-        cv2.putText(display_frame, label, (bbox[0], max(20, bbox[1] - 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            cv2.rectangle(display_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
+            cv2.putText(display_frame, label, (bbox[0], max(20, bbox[1] - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
     cv2.imshow("Creative Space Face Auth with DB", display_frame)
 
@@ -175,8 +187,9 @@ while cap.isOpened():
 
             if input_id and input_name:
                 if save_user_to_db(input_id, input_name, target_embedding):
-                    # 메모리 캐시 갱신
+                    # 메모리 캐시 및 유사도 비교용 행렬 갱신
                     enrolled_users = load_all_users_from_db()
+                    embed_matrix = build_embedding_matrix(enrolled_users)
                     print(f"🎉 {input_name}님 등록이 완료되었습니다!\n")
             else:
                 print("⚠️ 학번과 이름을 올바르게 입력해주세요.\n")
